@@ -628,4 +628,3 @@ The name **ESP4GW** is a reference to the DOS/4GW era and to the project's goal 
 It does not imply binary compatibility with DOS/4GW or affiliation with the original DOS/4GW developers or rights holders.
 
 All third-party product names and trademarks remain the property of their respective owners.
-<img width="150" height="180" alt="esp4gw_logo_150" src="https://github.com/user-attachments/assets/f9443903-f3f6-4e5d-9e28-2561befb88ee" />
