@@ -14,12 +14,17 @@ ESP4GW does **not** execute DOS binaries.
 
 Instead, legacy source code is recompiled natively for the ESP32, while ESP4GW provides compatible interfaces for the DOS-era services that the source expects.
 
-**Status: experimental / early development.** Native filesystem/runtime support and a shared keyboard implementation exist today. SeaBIOS-derived sources have been brought in as the foundation for a broader native vBIOS; their adaptation is unfinished. DPMI, managed swap, and the proposed P4 memory layout are development direction, not released capabilities.
+**Status: experimental / early development.** Native filesystem/runtime support, shared keyboard services, and an optional profile-backed memory service exist today. The SeaBIOS-derived vBIOS now includes an adapted E820 memory-map unit, named-resource and ISO installation work, and an emerging clock/timer boundary. The broader BIOS and timer integration remains unfinished. DPMI, managed swap, and the proposed P4 memory layout are development direction, not released capabilities.
 
 The native keyboard backend supports the ESP32 BLE Keyboard and onscreen input.
 See [keyboard integration and supported services](doc/keyboard-compatibility.md),
 [validation and resource measurements](doc/keyboard-validation.md), and the
 [standalone receiver example](examples/keyboard/README.md).
+
+The [memapper example](examples/memapper/README.md) exercises the new memory
+services on a host or ESP32-S3. Its original LilyGO T-Embed frontend provides a
+MANIFEST-inspired inspection UI with working display and jog controls. Memory
+profile search and optimization remain future work.
 
 ## Reading this README
 
@@ -27,6 +32,8 @@ See [keyboard integration and supported services](doc/keyboard-compatibility.md)
 - [Current status](#current-status)
 - [Architecture and call boundaries](#architecture-and-call-boundaries)
 - [The native vBIOS and SeaBIOS foundation](#the-native-vbios-and-seabios-foundation)
+- [New vBIOS units](#new-vbios-units)
+- [Clocks, timers, and chip choices](#clocks-timers-and-chip-choices)
 - [Devices and bidirectional services](#devices-and-bidirectional-services)
 - [Interrupts and callbacks](#interrupts-and-callbacks)
 - [Memory and address contracts](#memory-and-address-contracts)
@@ -458,7 +465,11 @@ This is intentional, but the exact error conventions still need work in some pat
 | Watcom personality | Active headers and native adapters; some interfaces are implemented, others remain declarations or unsupported stubs. |
 | Filesystem/runtime | Native implementations exist, with path, drive-mapping, and filesystem-specific limits. |
 | Keyboard | Shared input core, BLE report adapter, onscreen frontend, conio input, BIOS keyboard wrappers, and selected interrupt services. |
-| General vBIOS | SeaBIOS-derived files are present in `src/core/bios`; they are not registered in the current root component build. |
+| General vBIOS | Most imported sources remain outside the root component build; the adapted `memmap.cpp` is built with the optional memory service. |
+| Native memory | Checked profile/backing bindings, E820 publication, and a native paragraph allocator exist. Opt-in through `CONFIG_ESP4GW_MEMORY` or the memory-only component mode. |
+| memapper | Correctness fixture and MANIFEST-style inspection UI; original T-Embed display and jog operation confirmed. No optimizer or recommended production profile yet. |
+| ISO and named resources | `iso.cpp/.h` and `romfile.cpp/.h` provide early units; neither is registered in the root component build. |
+| Clocks and timers | Imported PIT/RTC behavior and an `esp_timer` callback adapter are present. Native clock ownership, BIOS routing, and chip/backend selection are not integrated. |
 | General vectors and interrupt masking | Not implemented as a complete facility; selected keyboard service dispatch is a narrower capability. |
 | DOS segmented allocation | `_dos_allocmem`, `_dos_freemem`, and `_dos_setblock` report unsupported. |
 | DPMI and swap | Planned; no working DPMI host or transparent paging claim. |
@@ -543,7 +554,7 @@ The intended architecture separates compiler-facing interfaces, service behavior
                          ESP32 hardware
 ```
 
-This is the target structure. Existing DOS and keyboard code supplies parts of it; the common resource and DPMI layers are still to be established.
+This is the target structure. Existing DOS, keyboard, and profile-backed memory code supplies parts of it; general resource ownership and DPMI layers are still to be established.
 
 ### Four ways across the boundary
 
@@ -584,6 +595,8 @@ SeaBIOS provides a substantial foundation for BIOS service contracts: function d
 
 Here, **vBIOS means the BIOS-facing service layer inside ESP4GW**. It is not a bootable ROM, a virtual x86 machine, or firmware that starts DOS. The acceptance target is an application's supported operations, not DOS 6.22 surviving a boot.
 
+See the [vBIOS README and FAQ](src/core/bios/README.md) for its scope, hardware ownership, and the role of the imported x86 sources.
+
 The imported files are not a ready-to-build ESP32 BIOS. They still contain x86 assembly, segmented addressing, physical PC addresses, firmware stacks, PC hardware initialization, and real/protected-mode transitions. Those mechanisms require replacement or exclusion from the native build.
 
 ### Reusable behavior and native replacements
@@ -591,12 +604,12 @@ The imported files are not a ready-to-build ESP32 BIOS. They still contain x86 a
 | Imported source | Intended role |
 |---|---|
 | `bregs.h` | Internal BIOS request/result representation and flag helpers, adapted to public compiler personalities. |
-| `bda.h` | Legacy layouts for exposed BIOS compatibility state. |
+| `std/bda.h` | Legacy layouts for exposed BIOS compatibility state. |
 | `biosvar.h` | Replace physical/segment access with access to native state. |
-| `disk.c`, `disk.h` | Request decoding, status handling, and a boundary for native disk operations. |
-| `clock.cpp` | BIOS clock behavior backed by native time sources. |
+| `disk.c`, `block.h` | Request decoding, status handling, and a boundary for native disk operations. |
+| `clock.c` | Imported BIOS tick/calendar behavior to adapt to native time sources. |
 | `output.c`, `output.h` | Useful output and diagnostic behavior after separating firmware dependencies. |
-| `farptr.h`, `stacks.c`, `x86.h` | Architecture-specific mechanisms to replace or exclude. |
+| `farptr.h`, `stacks.h`, `x86.c/.h` | Architecture-specific mechanisms to replace or exclude. |
 
 For example, `handle_1a00` reads the tick count, returns it in `CX:DX`, consumes the rollover indication, and clears carry. That behavior can become a native service. The surrounding setup still initializes PC timers/RTC hardware and interrupt entries; that is a separate adaptation task.
 
@@ -620,7 +633,95 @@ The imported configuration header mixes different kinds of definitions:
 
 Changing the application name to ESP4GW does not make the remaining constants native addresses. `BUILD_BIOS_ADDR = 0xf0000` is not a valid basis for dereferencing ESP32 memory. A historical machine identifier also must not advertise hardware or functions that do not exist.
 
-The first useful native slice is small: state access, a synchronous service, and a callback round trip. Keyboard, clock, display, and device status provide practical expansion points. Boot-sector loading, ROM reset vectors, and PC boot discovery are outside the project scope.
+The next service slices should remain small: state access, a synchronous service, and a callback round trip. Keyboard, clock, display, and device status provide practical expansion points. Boot-sector loading, ROM reset vectors, and PC boot discovery are outside the project scope.
+
+### New vBIOS units
+
+The BIOS directory contains units at different stages of adaptation. These are
+separate service building blocks, not a requirement to link the imported BIOS
+tree as a whole. The [root component source list](CMakeLists.txt) determines what
+normal ESP-IDF integration actually includes.
+
+| Unit | Purpose | Current boundary |
+|---|---|---|
+| [memmap.cpp/.h](src/core/bios/memmap.h) | Publish and enumerate a supplied compatibility memory map using base 20-byte E820 records. | Included with the optional native memory service. Describes ranges; does not allocate RAM or implement INT 15h dispatch. |
+| [memory.cpp](src/memory/memory.cpp) and [public memory API](include/esp4gw/memory.h) | Bind those ranges to caller-owned native storage, check accesses, and allocate conventional-memory paragraphs. | Native implementation with host tests and an S3 correctness fixture; Watcom allocation and DPMI adapters remain pending. |
+| [iso.cpp/.h](src/core/bios/iso.h) | Find a requested file set in an ISO9660 image and stage, verify, validate, and promote an installation. | Early `esp4gw::vbios.cdrom` facade adapted from dESPcent/ROTT work; not in the root component build. Not MSCDEX, a mounted DOS filesystem, or a physical optical-drive driver. |
+| [romfile.cpp/.h](src/core/bios/romfile.h) | Publish named byte resources through provider callbacks and let consumers look them up or load copies/settings. | SeaBIOS-derived registry with documented ownership; still depends on BIOS allocation/output helpers and is not in the root component build. |
+| [clock.c](src/core/bios/clock.c), [hw/timer.c](src/core/bios/hw/timer.c), [hw/rtc.c](src/core/bios/hw/rtc.c) | Reference behavior for BIOS time, PIT timing, and MC146818-compatible calendar/RTC services. | Imported PC-specific implementations awaiting native adaptation. |
+| [rtc/timer.cpp/.h](src/core/rtc/timer.h) | Supply a small QEMU-style deadline/callback API using ESP-IDF one-shot timers. | Initial adapter outside the root component build; its required native `qemu_clock_get_ns()` clock provider is not implemented in this tree. |
+
+The ISO unit accepts a caller-defined profile of filenames, search/staging/install
+directories, and a required content validator for installation. It supports a
+bounded subset of ISO9660 with 2048-byte sectors and contiguous files. Raw BIN/CUE,
+UDF, interleaving, and multi-extent files are outside that contract. Staging and
+byte verification protect existing data during normal operation; directory
+promotion is not a power-loss recovery guarantee.
+
+A romfile name is a configuration key, not a filesystem path or executable ROM.
+Providers retain ownership of persistent records and backing data. Registration
+is intended for setup, with no removal API or internal locking. This is a useful
+resource boundary, but documenting it does not make its remaining firmware
+dependencies native.
+
+## Clocks, Timers, and Chip Choices
+
+The [ESP32-S3 Timer and DOS PIT reference](doc/ESP32-S3_Timer_and_DOS_PIT.docx)
+establishes an important design distinction: **SYSTIMER is the native analog for
+the DOS system-timing role of PIT channel 0; calendar time belongs to a separate
+RTC service.** A monotonic elapsed-time clock and a clock that remembers the date
+serve different purposes.
+
+### Compatibility role versus native backend
+
+The chip names in the BIOS sources describe the legacy interfaces being adapted.
+They do not require those physical chips on an ESP32 board. The current choices
+are architectural direction, not an implemented menuconfig chip selector.
+
+| Role or choice | Legacy contract | ESP4GW direction and present state |
+|---|---|---|
+| 8253/8254 PIT channel 0 | Programmable interval timing, IRQ0/INT 08h, BIOS tick count, and the INT 1Ch application hook. | Derive supported tick/deadline behavior from a native monotonic clock. S3 SYSTIMER is the proposed underlying timebase; direct PIT port access is not implemented. |
+| MC146818-compatible RTC | Calendar/date registers, alarms, and periodic RTC events, distinct from the PIT heartbeat. | Adapt the useful service behavior to native wall-clock facilities and, where provided, an external RTC. Imported `hw/rtc.c` still performs PC CMOS port I/O. No external RTC chip backend is selected here. |
+| CPU TSC or ACPI PM timer | Alternative elapsed-time sources in the imported SeaBIOS timer code. | Historical alternatives to replace, not ESP32 hardware choices. The imported `CONFIG_PMTIMER` setting is not exposed by ESP4GW's root Kconfig. |
+| ESP-IDF `esp_timer` | Native deadline scheduling for compatibility callbacks. | The initial `src/core/rtc/timer.cpp` adapter uses one-shot timers and task-context dispatch; integration and lifecycle validation remain pending. |
+
+In the imported timer code, an already configured ACPI PM timer can take
+precedence; otherwise the CPU's TSC is used when available, with a PIT-based
+fallback when it is absent. That is SeaBIOS's PC selection logic, not detection
+logic to run on an ESP32. Similarly, inherited HPET addresses/tables do not
+establish an ESP32 HPET backend.
+
+### Timebase, tick accounting, and delivery
+
+The supplied S3 reference describes SYSTIMER as two 52-bit counters (`UNIT0` and
+`UNIT1`) with three comparators (`COMP0` through `COMP2`) and a nominal 16 MHz
+counting rate. Those hardware units are resources shared with the SDK, not three
+automatically available legacy timers. Native integration must respect ESP-IDF
+ownership rather than resetting or reprogramming SDK-owned counters/alarms.
+
+The DOS reference rate is approximately 1.193182 MHz divided by 65,536, giving
+about 18.2065 BIOS ticks per second, or 54.9254 ms per tick. A native implementation
+can derive that logical count from elapsed time without changing the FreeRTOS
+tick rate or generating an interrupt for every PIT input cycle. The legacy BDA
+location `0040:006C` describes compatibility state, never a native pointer.
+
+BIOS INT 1Ah function `00h` reads the system tick counter; functions `02h`–`05h`
+concern RTC time/date. Wall-clock corrections must not inadvertently move elapsed
+timers backward. Tick rollover, divisor changes, delayed delivery, sleep, and
+application hook behavior still need explicit native contracts and tests before
+these BIOS timer services can be advertised as supported.
+
+The initial timer adapter accepts absolute nanosecond deadlines, converts them
+to relative microsecond delays rounded upward, and dispatches through
+`ESP_TIMER_TASK`. Nanosecond API units do not promise nanosecond scheduling
+precision. Its QEMU-style names are a limited source interface, not a QEMU
+runtime. Comments refer to a future `clock.cpp` owner; today's BIOS file is still
+the imported `clock.c`, and it does not supply that native clock provider.
+
+Clock reading, BIOS tick accounting, calendar storage, and callback delivery
+therefore remain separate responsibilities. The adapter is a starting point;
+general IRQ/vector registration, safe callback cancellation, and timer-chip
+selection are not completed services.
 
 ## Devices and Bidirectional Services
 
@@ -682,13 +783,54 @@ The implementation must distinguish native pointers, legacy segment:offset value
 
 Adapters need explicit bounds, access rights, ownership, and lifetime rules. Public Watcom register structures and SeaBIOS `bregs` have different layouts and cannot simply be cast to one another. Scalar register compatibility does not solve pointer compatibility.
 
+### Implemented profile-backed memory
+
+The [native memory API](include/esp4gw/memory.h) now supplies an initial checked
+address resolver. A versioned profile declares reserved, RAM, conventional RAM,
+and read-only ROM regions, with explicit bindings to caller-owned backing buffers.
+Installing a valid profile also publishes its E820 topology through the vBIOS
+memory-map unit. An invalid replacement preserves the previous active state.
+
+Accesses must fit within one declared region and obey its permissions. Aliases,
+holes, overflowing ranges, and cross-region requests are rejected. General linear
+accesses do not wrap; the explicit segment:offset conversion helper handles its
+stated A20 policy. Callers serialize operations and stop consumers before
+reconfiguration/reset, which invalidates allocations and resolved pointers.
+
+One conventional arena supports native 16-byte paragraph allocation with fixed
+metadata for up to 128 live blocks, first-fit reuse, and in-place resizing.
+Allocation changes free-space accounting, not the E820 topology. This is not yet
+connected to Watcom `_dos_allocmem`, `_dos_freemem`, or `_dos_setblock`, and does
+not implement UMB, EMS, DPMI descriptors, or swap.
+
+### memapper inspection and validation
+
+[memapper](examples/memapper/README.md) is the development application for finding
+and validating useful DOS-compatible memory arrangements. It follows the
+`app` / `platform` / `src` split: application orchestration, host/ESP-IDF/T-Embed
+integration, and shared correctness/UI logic.
+
+The current fixture uses 320 KiB of backing: a 64 KiB conventional arena at
+`0x1000` and 256 KiB at `0x100000`, with the other declared first-MiB ranges
+reserved. This deliberately small fixture is not a chosen production layout or
+the board's usable-memory limit. Walking-bit and address-pattern checks exercise
+2,949,120 byte reads, alongside map, bounds, and paragraph-allocation checks.
+
+The original T-Embed has a working 320×170 MANIFEST-inspired UI with Run, Memory,
+Map, Checks, and System pages. The jog selects pages, a press switches detail,
+and a hold reruns the fixture on Run or returns home from another page. Display
+and controls have been confirmed on hardware. Automated profile search, ranking,
+recovery journaling, and production profile export remain planned. USB flashing
+reliability on the current development machine is separately unresolved; the
+example README records the evidence and current workflow.
+
 ### Reserved compatibility regions
 
 A proposed P4 profile could reserve a legacy address arena at startup and interpret supported legacy addresses as offsets within it. A 1 MiB arena is 3.125% of 32 MiB PSRAM and could hold conventional-memory-shaped data and selected BIOS/video layouts.
 
 This is native allocated storage, not a PC memory bus. It does not make physical address `0xB8000` a valid ESP32 pointer or create device side effects. Source using unrestricted historical pointer dereferences still needs compatibility accessors or localized adaptation.
 
-The arena's extent, aliasing, wrap rules, writable regions, and synchronization must be defined. Existing flat pointer helpers do not establish that this planned address resolver already exists.
+The proposed P4 arena's extent, aliasing, wrap rules, writable regions, and synchronization still need a profile-specific contract. The current resolver above covers explicit non-aliasing regions; it does not make a complete legacy first-MiB layout or arbitrary BIOS/video pointer access available.
 
 ### Memory classes
 
@@ -904,15 +1046,22 @@ Add the ESP4GW project root to the application's `EXTRA_COMPONENT_DIRS` before E
 
 The normal component exports `include` and `include/watcom`. Keep compatibility headers scoped to legacy sources, especially where names overlap standard library headers. The optional compiler-qualifier prefix should not be indiscriminately injected into SDK or unrelated C++ sources.
 
-Keyboard configuration is available through menuconfig:
+The following native services are available through menuconfig:
 
 | Option | Purpose |
 |---|---|
+| `CONFIG_ESP4GW_MEMORY` | Profile-backed memory, E820 map publication, and native paragraph allocation; disabled by default. |
 | `CONFIG_ESP4GW_KEYBOARD` | Native keyboard services and Watcom keyboard adapters. |
 | `CONFIG_ESP4GW_KEYBOARD_BLE_REPORTS` | Keyboard report decoder; the application supplies the Bluetooth host. |
 | `CONFIG_ESP4GW_ONSCREEN_KEYBOARD` | Reusable onscreen layout and input adapter. |
 
 `ESP4GW_KEYBOARD_ONLY=ON` is intended for applications already providing their own DOS interfaces. It exports the native keyboard layer without duplicate Watcom/DOS symbols. dESPcent uses this mode and subscribes to normalized events.
+
+`ESP4GW_MEMORY_ONLY=ON` builds only the native memory and E820 units and exports
+`include`, without the Watcom personality or keyboard sources. memapper uses this
+mode through its component wrapper. These are CMake integration modes; neither
+enables the rest of the BIOS tree. There is currently no root Kconfig option for
+PIT/RTC chip selection or the new ISO, romfile, and timer-adapter units.
 
 The [standalone receiver](examples/keyboard/README.md) demonstrates an ESP32-S3 Bluedroid integration and an original Watcom sample contract. Applications with an existing Bluetooth host should reuse routing and cleanup patterns without starting a second host.
 
@@ -927,6 +1076,14 @@ Header coverage, successful compilation, host regression tests, linked firmware,
 The [keyboard tests](tests/keyboard/CMakeLists.txt) cover core behavior, runtime/report handling, Watcom services, onscreen input, and optional dESPcent integrations. Use a configuration with assertions enabled. The workstation helper is `tools/test-keyboard.cmd`; other hosts can configure the CMake project under `tests/keyboard` and run CTest. Application integration cases require the corresponding dESPcent sources.
 
 The [validation record](doc/keyboard-validation.md) reports prior results and resource measurements. Its keyboard storage figures exclude Bluetooth host allocations, framebuffers, and other application resources where stated; they are not the memory cost of the whole application.
+
+The [memory test project](tests/memory/CMakeLists.txt), run by
+`tools/test-memory.cmd`, covers the mapper, E820 records, paragraph allocator,
+baseline fixture, and MANIFEST renderer. `tools/build-memapper-host.cmd` builds
+and runs the host fixture. These checks establish the current memory subset;
+they do not validate the unintegrated ISO/resource/timer units or qualify an
+optimized memory layout. Firmware evidence and remaining hardware limitations
+are recorded in the [memapper README](examples/memapper/README.md).
 
 New services should demonstrate observable contracts: register fields and flags, shared-state consistency, bounds, readiness, timeout/error behavior, ownership, and safe removal of callbacks. Device acceptance should include reconnect and simultaneous input sources where relevant.
 
@@ -945,7 +1102,12 @@ Diagnostics should identify unsupported requests accurately. Error translation b
 
 ### Development sequence
 
-The intended progression is shared call/address contracts, a small native vBIOS slice, callback registration and delivery, broader device services, common resource management, useful DPMI operations, P4/C6 validation, and managed backing storage.
+The implemented memory/E820 slice and keyboard services provide starting points.
+Next work includes validating useful memory profiles, integrating the ISO and
+named-resource units, establishing native monotonic/calendar clock ownership,
+and defining timer callback delivery. Broader device services, common resource
+management, useful DPMI operations, P4/C6 validation, and managed backing storage
+remain later development direction.
 
 That sequence is a direction rather than a fixed schedule. Real source ports should determine which services get implemented first. General graphics, port-I/O, vector, and DPMI declarations are not completed milestones.
 
@@ -957,7 +1119,12 @@ That sequence is a direction rather than a fixed schedule. Real source ports sho
 | [include/esp4gw](include/esp4gw) | Native public service interfaces. |
 | [src/personalities/watcom](src/personalities/watcom) | Compiler-personality implementations and adapters. |
 | [src/keyboard](src/keyboard) | Shared keyboard core, runtime, mapping, and adapters. |
-| [src/core/bios](src/core/bios) | SeaBIOS foundation being adapted; outside the current component source list. |
+| [src/core/bios](src/core/bios) | SeaBIOS foundation being adapted; `memmap.cpp` is included by the optional native memory component, other BIOS sources remain outside it. |
+| [src/memory](src/memory) | Opt-in profile-backed address mapping and native paragraph allocation; Watcom memory/DPMI adapters remain pending. |
+| [src/core/rtc](src/core/rtc) | Initial ESP-IDF deadline/callback adapter; native clock provider and build integration pending. |
+| [examples/memapper](examples/memapper) | Host/S3 memory correctness fixture and T-Embed MANIFEST UI for the planned profile optimizer. |
+| [tests/memory](tests/memory) | Host regression coverage for mapping, E820, paragraphs, the fixture, and UI rendering. |
+| [Timer and DOS PIT reference](doc/ESP32-S3_Timer_and_DOS_PIT.docx) | S3 SYSTIMER hardware reference and the distinction between PIT system timing and RTC calendar services. |
 | [examples/keyboard](examples/keyboard) | Standalone receiver and integration example. |
 | [examples/smoke_test](examples/smoke_test) | ESP-IDF smoke application. |
 | [tests/keyboard](tests/keyboard) | Native regression and integration tests. |
