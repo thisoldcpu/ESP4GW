@@ -21,10 +21,9 @@ See [keyboard integration and supported services](doc/keyboard-compatibility.md)
 [validation and resource measurements](doc/keyboard-validation.md), and the
 [standalone receiver example](examples/keyboard/README.md).
 
-The [memapper example](examples/memapper/README.md) exercises the new memory
-services on a host or ESP32-S3. Its original LilyGO T-Embed frontend provides a
-MANIFEST-inspired inspection UI with working display and jog controls. Memory
-profile search and optimization remain future work.
+[Memmapper](#memmapper) now exercises memory profiles on a host or ESP32-S3,
+with a working T-Embed inspection UI, custom-profile editor, SD records, and
+a first in-boot candidate sweep. See its dedicated section below.
 
 ## Reading this README
 
@@ -37,6 +36,7 @@ profile search and optimization remain future work.
 - [Devices and bidirectional services](#devices-and-bidirectional-services)
 - [Interrupts and callbacks](#interrupts-and-callbacks)
 - [Memory and address contracts](#memory-and-address-contracts)
+- [Memmapper](#memmapper)
 - [DPMI foundation](#dpmi-foundation)
 - [Virtual memory and swap](#virtual-memory)
 - [Target platforms and P4 memory budgets](#target-platforms)
@@ -465,9 +465,10 @@ This is intentional, but the exact error conventions still need work in some pat
 | Watcom personality | Active headers and native adapters; some interfaces are implemented, others remain declarations or unsupported stubs. |
 | Filesystem/runtime | Native implementations exist, with path, drive-mapping, and filesystem-specific limits. |
 | Keyboard | Shared input core, BLE report adapter, onscreen frontend, conio input, BIOS keyboard wrappers, and selected interrupt services. |
+| PC speaker tones | Optional shared tone service, Watcom `sound()`/`nosound()` adapters, and a T-Embed I2S backend in memapper. Host/build validation; audible hardware acceptance pending. No direct PIT-port support. |
 | General vBIOS | Most imported sources remain outside the root component build; the adapted `memmap.cpp` is built with the optional memory service. |
 | Native memory | Checked profile/backing bindings, E820 publication, and a native paragraph allocator exist. Opt-in through `CONFIG_ESP4GW_MEMORY` or the memory-only component mode. |
-| memapper | Correctness fixture and MANIFEST-style inspection UI; original T-Embed display and jog operation confirmed. No optimizer or recommended production profile yet. |
+| Memmapper | T-Embed inspection UI, custom-profile correctness checks, SD session records, and an initial in-boot size/placement sweep. Reboot recovery and qualified production profiles remain planned. |
 | ISO and named resources | `iso.cpp/.h` and `romfile.cpp/.h` provide early units; neither is registered in the root component build. |
 | Clocks and timers | Imported PIT/RTC behavior and an `esp_timer` callback adapter are present. Native clock ownership, BIOS routing, and chip/backend selection are not integrated. |
 | General vectors and interrupt masking | Not implemented as a complete facility; selected keyboard service dispatch is a narrower capability. |
@@ -747,6 +748,13 @@ The keyboard already demonstrates ownership separation: an application with a Bl
 
 Future port-I/O compatibility follows the same approach. A supported palette or device-control operation can translate into a native service. Arbitrary PC port traffic, undocumented polling loops, and exact bus timing are not covered merely by declaring `inp` and `outp`.
 
+PC speaker tones now provide another small native service: `sound(frequency)`
+and `nosound()` call a shared monophonic tone generator, while an application-owned
+audio backend supplies physical output. memapper uses the original T-Embed's I2S
+path for start, success, and failure cues. This does not require changes to the
+imported BIOS timer or provide PIT channel 2 port emulation. See the
+[speaker contract and validation limits](doc/speaker-compatibility.md).
+
 ## Interrupts and Callbacks
 
 An interrupt-number service API, an application callback, and an ESP32 hardware ISR have different contracts. Combining them indiscriminately would make blocking, locking, and reentrancy unsafe.
@@ -803,27 +811,6 @@ Allocation changes free-space accounting, not the E820 topology. This is not yet
 connected to Watcom `_dos_allocmem`, `_dos_freemem`, or `_dos_setblock`, and does
 not implement UMB, EMS, DPMI descriptors, or swap.
 
-### memapper inspection and validation
-
-[memapper](examples/memapper/README.md) is the development application for finding
-and validating useful DOS-compatible memory arrangements. It follows the
-`app` / `platform` / `src` split: application orchestration, host/ESP-IDF/T-Embed
-integration, and shared correctness/UI logic.
-
-The current fixture uses 320 KiB of backing: a 64 KiB conventional arena at
-`0x1000` and 256 KiB at `0x100000`, with the other declared first-MiB ranges
-reserved. This deliberately small fixture is not a chosen production layout or
-the board's usable-memory limit. Walking-bit and address-pattern checks exercise
-2,949,120 byte reads, alongside map, bounds, and paragraph-allocation checks.
-
-The original T-Embed has a working 320×170 MANIFEST-inspired UI with Run, Memory,
-Map, Checks, and System pages. The jog selects pages, a press switches detail,
-and a hold reruns the fixture on Run or returns home from another page. Display
-and controls have been confirmed on hardware. Automated profile search, ranking,
-recovery journaling, and production profile export remain planned. USB flashing
-reliability on the current development machine is separately unresolved; the
-example README records the evidence and current workflow.
-
 ### Reserved compatibility regions
 
 A proposed P4 profile could reserve a legacy address arena at startup and interpret supported legacy addresses as offsets within it. A 1 MiB arena is 3.125% of 32 MiB PSRAM and could hold conventional-memory-shaped data and selected BIOS/video layouts.
@@ -843,6 +830,82 @@ The proposed P4 arena's extent, aliasing, wrap rules, writable regions, and sync
 | Backing storage | Reloadable assets and future swap contents; not directly usable RAM. |
 
 Resident does not automatically mean ISR-safe, cache-disabled-safe, or DMA-capable. Those are separate requirements. Required reservations should be made before competing allocations and fail initialization explicitly if they cannot be satisfied.
+
+## Memmapper
+
+<p align="center">
+  <img width="800" alt="ESP4GW's memmapper running a test" src="images/esp4gw_memmapper_run_1.jpg" />
+</p>
+
+[Memmapper](examples/memmapper/README.md) is ESP4GW's memory-profile experiment:
+give a native DOS port a useful address layout, establish real backing for it,
+and test whether that arrangement works and what it costs. QEMM OPTIMIZE.EXE is
+the inspiration for trying arrangements; Quarterdeck MANIFEST is the inspiration
+for inspecting them. The eventual goal is a repeatable boot, test, record, and
+reboot cycle that produces a measured profile for a particular board and workload.
+
+### Working on the device
+
+The original LilyGO T-Embed now provides a 320×170 inspection interface with
+Run, Memory, Map, Checks, and System pages. Jog and BLE-keyboard input support
+navigation and profile editing; the board frontend also supplies speaker cues,
+status-ring feedback, a voltage display, and idle dimming. The supplied hardware
+photo shows a custom-profile PASS after four attempts. That demonstrates an
+on-device correctness run, not a qualified game workload or optimized default.
+
+Each run allocates candidate backing in PSRAM, installs the profile through the
+shared [memory service](include/esp4gw/memory.h), and checks E820 reporting,
+walking-bit/address-pattern integrity, bounds and permissions, and conventional
+paragraph allocation. The vBIOS map reports the arrangement; the memory service
+resolves accesses into its actual backing. Candidate backing is released after
+the run. DPMI integration remains a separate development step.
+
+The baseline provides 64 KiB of conventional memory at `0x1000` and 256 KiB of
+extended memory at `0x100000`. These are small test-fixture sizes, not the board's
+limits or recommended application settings. Custom profiles can change them,
+including testing with no extended memory.
+
+### Trying an arrangement
+
+- Turn the jog to select a page; press to switch Overview/Details.
+- On **Map → Details**, press **E** on the BLE keyboard to edit conventional and
+  extended KiB. **F5** validates the draft; **F6** selects it as untested.
+- On **Run**, hold the knob to test the selection. During a run, hold the knob
+  or press **Ctrl+Escape** to request a cooperative abort.
+- With the editor closed on **Map → Details**, **F8** selects the baseline;
+  **F9** starts the current candidate sweep using the selected sizes as its plan.
+
+The implemented sweep holds conventional memory fixed, tests conventional-only
+first, then adds extended memory in whole 1 MiB steps up to the selected ceiling.
+At each extended size it tries backing offsets of 0, 8, 16, and 24 KiB between
+the two RAM regions, while retaining their DOS-visible start addresses. It
+continues through the plan and records the passing arrangement with the highest
+observed integrity-test rate. This sweep runs within one boot; it does not yet
+perform the planned reboot/recovery search.
+
+### Reading the evidence
+
+Serial results and optional SD records identify each attempt and its outcome.
+Each boot gets a separate `/memmapper/sNNNNNN/` directory containing
+`manifest.json` and `results.jsonl`, with run-start/result records and a sweep
+summary when completed. Missing SD media leaves testing available. An unfinished
+start record does not by itself prove that its candidate failed.
+
+The displayed **elapsed** value includes whole-run overhead. The separate
+`integrity_ms` and `bytes_per_second` fields measure the integrity phase with
+checkpoint time subtracted; they are an initial comparison signal, not game
+performance or total memory-bus throughput. Checked bytes count verification
+reads across test passes, not unique RAM capacity. A fastest observed result
+still needs repeated measurements and application validation before becoming a
+recommended profile.
+
+Automatic reboot recovery/resume, broader policy search, and production profile
+export remain planned. Some UI labels and the example's older implementation
+notes still say search/ranking is absent; the current
+[sweep implementation](examples/memmapper/src/sweep.h) and
+[runner](examples/memmapper/app/main.cpp) implement the limited in-boot sweep
+described here. The example README contains the detailed board, editor, storage,
+and experiment-design notes.
 
 ## DPMI Foundation
 
@@ -1051,6 +1114,7 @@ The following native services are available through menuconfig:
 | Option | Purpose |
 |---|---|
 | `CONFIG_ESP4GW_MEMORY` | Profile-backed memory, E820 map publication, and native paragraph allocation; disabled by default. |
+| `CONFIG_ESP4GW_SPEAKER` | Native PC speaker tones and Watcom sound adapters; disabled by default, requires an application-owned audio backend. |
 | `CONFIG_ESP4GW_KEYBOARD` | Native keyboard services and Watcom keyboard adapters. |
 | `CONFIG_ESP4GW_KEYBOARD_BLE_REPORTS` | Keyboard report decoder; the application supplies the Bluetooth host. |
 | `CONFIG_ESP4GW_ONSCREEN_KEYBOARD` | Reusable onscreen layout and input adapter. |
@@ -1058,9 +1122,11 @@ The following native services are available through menuconfig:
 `ESP4GW_KEYBOARD_ONLY=ON` is intended for applications already providing their own DOS interfaces. It exports the native keyboard layer without duplicate Watcom/DOS symbols. dESPcent uses this mode and subscribes to normalized events.
 
 `ESP4GW_MEMORY_ONLY=ON` builds only the native memory and E820 units and exports
-`include`, without the Watcom personality or keyboard sources. memapper uses this
-mode through its component wrapper. These are CMake integration modes; neither
-enables the rest of the BIOS tree. There is currently no root Kconfig option for
+`include`, without the Watcom personality or keyboard sources.
+`ESP4GW_NATIVE_ONLY=ON` omits the Watcom personality while honoring the native
+memory, keyboard, and speaker Kconfig switches; memapper uses this mode to combine
+memory services with optional input and sound. These are CMake integration modes;
+none enables the rest of the BIOS tree. There is currently no root Kconfig option for
 PIT/RTC chip selection or the new ISO, romfile, and timer-adapter units.
 
 The [standalone receiver](examples/keyboard/README.md) demonstrates an ESP32-S3 Bluedroid integration and an original Watcom sample contract. Applications with an existing Bluetooth host should reuse routing and cleanup patterns without starting a second host.
@@ -1083,7 +1149,7 @@ baseline fixture, and MANIFEST renderer. `tools/build-memapper-host.cmd` builds
 and runs the host fixture. These checks establish the current memory subset;
 they do not validate the unintegrated ISO/resource/timer units or qualify an
 optimized memory layout. Firmware evidence and remaining hardware limitations
-are recorded in the [memapper README](examples/memapper/README.md).
+are recorded in the [memapper README](examples/memmapper/README.md).
 
 New services should demonstrate observable contracts: register fields and flags, shared-state consistency, bounds, readiness, timeout/error behavior, ownership, and safe removal of callbacks. Device acceptance should include reconnect and simultaneous input sources where relevant.
 
@@ -1121,8 +1187,9 @@ That sequence is a direction rather than a fixed schedule. Real source ports sho
 | [src/keyboard](src/keyboard) | Shared keyboard core, runtime, mapping, and adapters. |
 | [src/core/bios](src/core/bios) | SeaBIOS foundation being adapted; `memmap.cpp` is included by the optional native memory component, other BIOS sources remain outside it. |
 | [src/memory](src/memory) | Opt-in profile-backed address mapping and native paragraph allocation; Watcom memory/DPMI adapters remain pending. |
+| [src/speaker](src/speaker) | Optional monophonic tone state and PCM generation, shared by Watcom calls and native applications. |
 | [src/core/rtc](src/core/rtc) | Initial ESP-IDF deadline/callback adapter; native clock provider and build integration pending. |
-| [examples/memapper](examples/memapper) | Host/S3 memory correctness fixture and T-Embed MANIFEST UI for the planned profile optimizer. |
+| [examples/memmapper](examples/memmapper) | Host/S3 memory correctness fixture and T-Embed MANIFEST UI for the planned profile optimizer. |
 | [tests/memory](tests/memory) | Host regression coverage for mapping, E820, paragraphs, the fixture, and UI rendering. |
 | [Timer and DOS PIT reference](doc/ESP32-S3_Timer_and_DOS_PIT.docx) | S3 SYSTIMER hardware reference and the distinction between PIT system timing and RTC calendar services. |
 | [examples/keyboard](examples/keyboard) | Standalone receiver and integration example. |
