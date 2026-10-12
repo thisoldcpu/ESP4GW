@@ -864,7 +864,7 @@ reboot cycle that produces a measured profile for a particular board and workloa
 
 ### Working on the device
 
-The original LilyGO T-Embed now provides a 320Ã—170 inspection interface with
+The original LilyGO T-Embed now provides a 320x170 inspection interface with
 Run, Memory, Map, Checks, and System pages. Jog and BLE-keyboard input support
 navigation and profile editing; the board frontend also supplies speaker cues,
 status-ring feedback, a voltage display, and idle dimming. The supplied hardware
