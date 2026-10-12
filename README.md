@@ -6,6 +6,18 @@
 
 Its goal is to make it easier to port source code originally written for DOS, Watcom C/C++, DOS/4GW, and similar protected-mode environments to modern ESP32 hardware without first rewriting every DOS-facing part of the program.
 
+The objective is to preserve and restore original application code. When a
+reusable DOS-era contract moves into ESP4GW, an existing port can remove its
+platform-specific workaround and bring back the original code that used that
+contract. A later port should need fewer such adaptations from the outset.
+
+dESPcent supplied the first application proof; ROTT is the next proving ground.
+The feedback runs in both directions: requirements exposed by ROTT can improve
+ESP4GW, and those improvements can return to dESPcent as backports that restore
+original engine paths. Higher resolutions and restored engine double buffering
+are motivations for this work, not capabilities established by current shared
+integration alone.
+
 ESP4GW does **not** run DOS.
 
 ESP4GW does **not** emulate a PC.
@@ -14,7 +26,7 @@ ESP4GW does **not** execute DOS binaries.
 
 Instead, legacy source code is recompiled natively for the ESP32, while ESP4GW provides compatible interfaces for the DOS-era services that the source expects.
 
-**Status: experimental / early development.** Native filesystem/runtime support, shared keyboard services, and an optional profile-backed memory service exist today. The SeaBIOS-derived vBIOS now includes an adapted E820 memory-map unit, named-resource and ISO installation work, and an emerging clock/timer boundary. The broader BIOS and timer integration remains unfinished. DPMI, managed swap, and the proposed P4 memory layout are development direction, not released capabilities.
+**Status: experimental / early development.** Native filesystem/runtime support, shared keyboard services, and an optional profile-backed memory service exist today. The SeaBIOS-derived vBIOS now includes an adapted E820 memory-map unit, named-resource and ISO installation work, and an emerging clock/timer boundary in the source tree. Those ISO/resource/timer units remain outside the root component build; broader BIOS and timer integration remains unfinished. DPMI, managed swap, and the proposed P4 memory layout are development direction, not released capabilities. A raw file-backed page store is implemented and tested separately; it is not yet connected to paging or eviction.
 
 The native keyboard backend supports the ESP32 BLE Keyboard and onscreen input.
 See [keyboard integration and supported services](doc/keyboard-compatibility.md),
@@ -23,7 +35,11 @@ See [keyboard integration and supported services](doc/keyboard-compatibility.md)
 
 [Memmapper](#memmapper) now exercises memory profiles on a host or ESP32-S3,
 with a working T-Embed inspection UI, custom-profile editor, SD records, and
-a first in-boot candidate sweep. See its dedicated section below.
+an experimental in-boot candidate sweep with repeated measurements. Its Delphi FMX viewer has been demonstrated receiving live results on Windows. See the dedicated sections below.
+
+The [source and validation record](doc/readme-evidence-2026-10-12.md) identifies
+the evidence, integration boundaries, and outstanding documentation drift behind
+the current status statements.
 
 ## Reading this README
 
@@ -36,11 +52,12 @@ a first in-boot candidate sweep. See its dedicated section below.
 - [Devices and bidirectional services](#devices-and-bidirectional-services)
 - [Interrupts and callbacks](#interrupts-and-callbacks)
 - [Memory and address contracts](#memory-and-address-contracts)
-- [Memmapper](#memmapper)
+- [Memmapper](#memmapper) and [MMV desktop viewer](#mmv-desktop-viewer)
 - [DPMI foundation](#dpmi-foundation)
 - [Virtual memory and swap](#virtual-memory)
 - [Target platforms and P4 memory budgets](#target-platforms)
 - [Integration, validation, and development direction](#integration-and-validation)
+- [Current host build commands](#current-host-build-commands)
 
 ---
 
@@ -449,9 +466,9 @@ Examples include:
 - file open/create/close
 - file read/write
 - file attributes
-- file timestamps
+- file timestamp reads (setting timestamps remains unsupported)
 - date and time queries
-- filesystem free-space queries
+- filesystem free-space queries (currently against `/`, not an application-selected SD mount)
 - DOS-style error translation
 
 Unsupported facilities currently report an explicit unsupported result rather than manufacturing DOS behavior.
@@ -465,15 +482,16 @@ This is intentional, but the exact error conventions still need work in some pat
 | Watcom personality | Active headers and native adapters; some interfaces are implemented, others remain declarations or unsupported stubs. |
 | Filesystem/runtime | Native implementations exist, with path, drive-mapping, and filesystem-specific limits. |
 | Keyboard | Shared input core, BLE report adapter, onscreen frontend, conio input, BIOS keyboard wrappers, and selected interrupt services. |
-| PC speaker tones | Optional shared tone service, Watcom `sound()`/`nosound()` adapters, and a T-Embed I2S backend in memapper. Host/build validation; audible hardware acceptance pending. No direct PIT-port support. |
+| PC speaker tones | Optional shared tone service, Watcom `sound()`/`nosound()` adapters, and a T-Embed I2S backend in memmapper. Host contract tests pass; speaker output via system and test state beeps. No fresh hardware qualification in this audit or direct PIT-port support. |
 | General vBIOS | Most imported sources remain outside the root component build; the adapted `memmap.cpp` is built with the optional memory service. |
 | Native memory | Checked profile/backing bindings, E820 publication, and a native paragraph allocator exist. Opt-in through `CONFIG_ESP4GW_MEMORY` or the memory-only component mode. |
-| Memmapper | T-Embed inspection UI, custom-profile correctness checks, SD session records, and an initial in-boot size/placement sweep. Reboot recovery and qualified production profiles remain planned. |
+| Memmapper | T-Embed inspection UI, custom-profile correctness checks, SD session records, and in-boot size/scatter sweeps with three repeats and worst-latency ranking. Reboot recovery and qualified production profiles remain planned. |
+| MMV viewer | Delphi 13 FMX receive-only serial/capture viewer with Windows live operation. Latest-source/release acceptance remains separate; non-Windows serial adapters are unimplemented. |
 | ISO and named resources | `iso.cpp/.h` and `romfile.cpp/.h` provide early units; neither is registered in the root component build. |
 | Clocks and timers | Imported PIT/RTC behavior and an `esp_timer` callback adapter are present. Native clock ownership, BIOS routing, and chip/backend selection are not integrated. |
 | General vectors and interrupt masking | Not implemented as a complete facility; selected keyboard service dispatch is a narrower capability. |
 | DOS segmented allocation | `_dos_allocmem`, `_dos_freemem`, and `_dos_setblock` report unsupported. |
-| DPMI and swap | Planned; no working DPMI host or transparent paging claim. |
+| DPMI and swap | No working DPMI host or paging system. A compiled, separately tested raw file page store exists; resident cache, eviction and fault-path integration remain planned. |
 | P4/C6 hardware | Target direction; existing documented firmware validation is on ESP32-S3. |
 
 Declaring an API does not establish its implementation. Likewise, a working `_dos_*` wrapper does not establish that its equivalent INT 21h function is routed through the register dispatcher.
@@ -648,7 +666,7 @@ normal ESP-IDF integration actually includes.
 | [memmap.cpp/.h](src/core/bios/memmap.h) | Publish and enumerate a supplied compatibility memory map using base 20-byte E820 records. | Included with the optional native memory service. Describes ranges; does not allocate RAM or implement INT 15h dispatch. |
 | [memory.cpp](src/memory/memory.cpp) and [public memory API](include/esp4gw/memory.h) | Bind those ranges to caller-owned native storage, check accesses, and allocate conventional-memory paragraphs. | Native implementation with host tests and an S3 correctness fixture; Watcom allocation and DPMI adapters remain pending. |
 | [iso.cpp/.h](src/core/bios/iso.h) | Find a requested file set in an ISO9660 image and stage, verify, validate, and promote an installation. | Early `esp4gw::vbios.cdrom` facade adapted from dESPcent/ROTT work; not in the root component build. Not MSCDEX, a mounted DOS filesystem, or a physical optical-drive driver. |
-| [romfile.cpp/.h](src/core/bios/romfile.h) | Publish named byte resources through provider callbacks and let consumers look them up or load copies/settings. | SeaBIOS-derived registry with documented ownership; still depends on BIOS allocation/output helpers and is not in the root component build. |
+| [romfile.cpp/.h](src/core/bios/romfile.h) | Publish named byte resources through provider callbacks and let consumers look them up or load copies/settings. | SeaBIOS-derived registry with documented ship; still depends on BIOS allocation/output helpers and is not in the root component build. |
 | [clock.c](src/core/bios/clock.c), [hw/timer.c](src/core/bios/hw/timer.c), [hw/rtc.c](src/core/bios/hw/rtc.c) | Reference behavior for BIOS time, PIT timing, and MC146818-compatible calendar/RTC services. | Imported PC-specific implementations awaiting native adaptation. |
 | [rtc/timer.cpp/.h](src/core/rtc/timer.h) | Supply a small QEMU-style deadline/callback API using ESP-IDF one-shot timers. | Initial adapter outside the root component build; its required native `qemu_clock_get_ns()` clock provider is not implemented in this tree. |
 
@@ -660,7 +678,7 @@ byte verification protect existing data during normal operation; directory
 promotion is not a power-loss recovery guarantee.
 
 A romfile name is a configuration key, not a filesystem path or executable ROM.
-Providers retain ownership of persistent records and backing data. Registration
+Providers retain ship of persistent records and backing data. Registration
 is intended for setup, with no removal API or internal locking. This is a useful
 resource boundary, but documenting it does not make its remaining firmware
 dependencies native.
@@ -698,7 +716,7 @@ The supplied S3 reference describes SYSTIMER as two 52-bit counters (`UNIT0` and
 `UNIT1`) with three comparators (`COMP0` through `COMP2`) and a nominal 16 MHz
 counting rate. Those hardware units are resources shared with the SDK, not three
 automatically available legacy timers. Native integration must respect ESP-IDF
-ownership rather than resetting or reprogramming SDK-owned counters/alarms.
+ship rather than resetting or reprogramming SDK-owned counters/alarms.
 
 The DOS reference rate is approximately 1.193182 MHz divided by 65,536, giving
 about 18.2065 BIOS ticks per second, or 54.9254 ms per tick. A native implementation
@@ -706,7 +724,7 @@ can derive that logical count from elapsed time without changing the FreeRTOS
 tick rate or generating an interrupt for every PIT input cycle. The legacy BDA
 location `0040:006C` describes compatibility state, never a native pointer.
 
-BIOS INT 1Ah function `00h` reads the system tick counter; functions `02h`–`05h`
+BIOS INT 1Ah function `00h` reads the system tick counter; functions `02h`â€“`05h`
 concern RTC time/date. Wall-clock corrections must not inadvertently move elapsed
 timers backward. Tick rollover, divisor changes, delayed delivery, sleep, and
 application hook behavior still need explicit native contracts and tests before
@@ -716,7 +734,7 @@ The initial timer adapter accepts absolute nanosecond deadlines, converts them
 to relative microsecond delays rounded upward, and dispatches through
 `ESP_TIMER_TASK`. Nanosecond API units do not promise nanosecond scheduling
 precision. Its QEMU-style names are a limited source interface, not a QEMU
-runtime. Comments refer to a future `clock.cpp` owner; today's BIOS file is still
+runtime. Comments refer to a future `clock.cpp` ; today's BIOS file is still
 the imported `clock.c`, and it does not supply that native clock provider.
 
 Clock reading, BIOS tick accounting, calendar storage, and callback delivery
@@ -737,20 +755,20 @@ The proposed device contract needs to answer:
 | Capabilities | Supported input, output, status, control, and event operations. |
 | Transfers | Units, formats, access sizes, partial transfers, and ordering. |
 | Waiting | Blocking, polling, timeouts, and asynchronous completion. |
-| Ownership | Buffer lifetime, input consumption, and resource release. |
+| ship | Buffer lifetime, input consumption, and resource release. |
 | Concurrency | Operations allowed to overlap and their synchronization. |
 | Events | Readiness, completion, disconnect, and fault delivery. |
 | Failure | Translation from backend errors into the legacy interface. |
 
 Not every device implements every operation. Unsupported capabilities need deliberate results. Bidirectional devices should not inherit an input-only or output-only model simply because it was the first backend implemented.
 
-The keyboard already demonstrates ownership separation: an application with a Bluetooth host retains initialization, pairing, and routing responsibility; ESP4GW accepts keyboard reports. Device identity and HID usage distinguish keyboards from gamepads even when report IDs match. Disconnect releases the affected source's held keys without releasing another source's keys.
+The keyboard already demonstrates ship separation: an application with a Bluetooth host retains initialization, pairing, and routing responsibility; ESP4GW accepts keyboard reports. Device identity and HID usage distinguish keyboards from gamepads even when report IDs match. Disconnect releases the affected source's held keys without releasing another source's keys.
 
 Future port-I/O compatibility follows the same approach. A supported palette or device-control operation can translate into a native service. Arbitrary PC port traffic, undocumented polling loops, and exact bus timing are not covered merely by declaring `inp` and `outp`.
 
 PC speaker tones now provide another small native service: `sound(frequency)`
 and `nosound()` call a shared monophonic tone generator, while an application-owned
-audio backend supplies physical output. memapper uses the original T-Embed's I2S
+audio backend supplies physical output. memmapper uses the original T-Embed's I2S
 path for start, success, and failure cues. This does not require changes to the
 imported BIOS timer or provide PIT channel 2 port emulation. See the
 [speaker contract and validation limits](doc/speaker-compatibility.md).
@@ -789,7 +807,7 @@ Address resolution is a common foundation beneath DOS, vBIOS, and DPMI. It shoul
 
 The implementation must distinguish native pointers, legacy segment:offset values, selector:offset references, managed allocation handles, and native callback identities. Even when their integers fit in the same field, they are not interchangeable.
 
-Adapters need explicit bounds, access rights, ownership, and lifetime rules. Public Watcom register structures and SeaBIOS `bregs` have different layouts and cannot simply be cast to one another. Scalar register compatibility does not solve pointer compatibility.
+Adapters need explicit bounds, access rights, ship, and lifetime rules. Public Watcom register structures and SeaBIOS `bregs` have different layouts and cannot simply be cast to one another. Scalar register compatibility does not solve pointer compatibility.
 
 ### Implemented profile-backed memory
 
@@ -834,7 +852,7 @@ Resident does not automatically mean ISR-safe, cache-disabled-safe, or DMA-capab
 ## Memmapper
 
 <p align="center">
-  <img width="800" alt="ESP4GW's memmapper running a test" src="images/esp4gw_memmapper_run_1.jpg" />
+  <img width="800" alt="ESP4GW's memmapper running on a Lilygo T-Embed.jpg " src="images/esp4gw_memmapper_run_1.jpg" />
 </p>
 
 [Memmapper](examples/memmapper/README.md) is ESP4GW's memory-profile experiment:
@@ -846,7 +864,7 @@ reboot cycle that produces a measured profile for a particular board and workloa
 
 ### Working on the device
 
-The original LilyGO T-Embed now provides a 320×170 inspection interface with
+The original LilyGO T-Embed now provides a 320Ã—170 inspection interface with
 Run, Memory, Map, Checks, and System pages. Jog and BLE-keyboard input support
 navigation and profile editing; the board frontend also supplies speaker cues,
 status-ring feedback, a voltage display, and idle dimming. The supplied hardware
@@ -868,20 +886,23 @@ including testing with no extended memory.
 ### Trying an arrangement
 
 - Turn the jog to select a page; press to switch Overview/Details.
-- On **Map → Details**, press **E** on the BLE keyboard to edit conventional and
+- On **Map â†’ Details**, press **E** on the BLE keyboard to edit conventional and
   extended KiB. **F5** validates the draft; **F6** selects it as untested.
 - On **Run**, hold the knob to test the selection. During a run, hold the knob
   or press **Ctrl+Escape** to request a cooperative abort.
-- With the editor closed on **Map → Details**, **F8** selects the baseline;
+- With the editor closed on **Map â†’ Details**, **F8** selects the baseline;
   **F9** starts the current candidate sweep using the selected sizes as its plan.
 
 The implemented sweep holds conventional memory fixed, tests conventional-only
 first, then adds extended memory in whole 1 MiB steps up to the selected ceiling.
-At each extended size it tries backing offsets of 0, 8, 16, and 24 KiB between
-the two RAM regions, while retaining their DOS-visible start addresses. It
-continues through the plan and records the passing arrangement with the highest
-observed integrity-test rate. This sweep runs within one boot; it does not yet
-perform the planned reboot/recovery search.
+At each extended size it tries the implemented scatter arrangements and a
+split placement with conventional memory in internal SRAM. The backing pools
+are real, simultaneously resident allocations; scattering does not increase
+physical capacity. Each arrangement runs three times. All repeats must pass to
+qualify, and each size's winner minimizes the worst maximum-operation latency
+across its repeats. The final headline describes the selected ceiling-size
+result, not necessarily an earlier, smaller passing size. This sweep runs
+within one boot; it does not yet perform the planned reboot/recovery search.
 
 ### Reading the evidence
 
@@ -893,11 +914,19 @@ start record does not by itself prove that its candidate failed.
 
 The displayed **elapsed** value includes whole-run overhead. The separate
 `integrity_ms` and `bytes_per_second` fields measure the integrity phase with
-checkpoint time subtracted; they are an initial comparison signal, not game
-performance or total memory-bus throughput. Checked bytes count verification
+checkpoint time subtracted. Aggregate integrity time still includes pattern
+generation, verification and loop overhead; only the per-operation latency
+brackets the mapper read/write itself. These are initial comparison signals,
+not game performance or pure memory-bus throughput. Checked bytes count verification
 reads across test passes, not unique RAM capacity. A fastest observed result
 still needs repeated measurements and application validation before becoming a
 recommended profile.
+
+The separate SD scratch-file probe records five raw microsecond components:
+`write_io_us`, `write_yield_us`, `read_io_us`, `read_yield_us`, and `cleanup_us`.
+I/O and scheduling/yield costs remain distinct. This measures storage behavior,
+not the performance of a functioning pager. Host-model output validates logic
+with host allocations and does not characterize ESP32 PSRAM or SD timing.
 
 Automatic reboot recovery/resume, broader policy search, and production profile
 export remain planned. Some UI labels and the example's older implementation
@@ -906,6 +935,20 @@ notes still say search/ranking is absent; the current
 [runner](examples/memmapper/app/main.cpp) implement the limited in-boot sweep
 described here. The example README contains the detailed board, editor, storage,
 and experiment-design notes.
+
+### MMV desktop viewer
+
+<p align="center">
+  <img width="800" alt="Host " src="images/Screenshot%202026-10-12%20022633.png" />
+</p>
+
+[MMV](examples/memmapper/tools/mmv) is the Delphi 13 FireMonkey viewer. It receives serial output or reads saved captures, keeps attempts/repeats as table rows, and shows setup, available activity, outcomes, measurements and the raw log. The current source has separate columns for the five SD timing fields.
+
+Windows live reception and table updates. The current transport is receive-only; expected busy-port errors appear inline so the monitor can be closed and Connect retried. Only one application can own the serial port at a time.
+
+Serial output currently uses text and JSON. The parser understands start/stage/result records and legacy lines, but the current firmware does not emit every event the parser supports. Older captures with `write_us`/`read_us` do not populate the new five-field timing columns. Setup-first reporting is evolving; binary reporting and interactive headless serial control are not implemented.
+
+Source and IDE build instructions live in the [MMV README](examples/memmapper/tools/mmv/README.md). Validated release binaries are intended for GitHub so users will not need Delphi. A packaged release is not claimed here. macOS/Linux serial support remains unimplemented; shared FMX source alone does not establish a supported Linux build.
 
 ## DPMI Foundation
 
@@ -968,7 +1011,13 @@ None of these require ESP4GW to become an emulator.
 
 ## Virtual Memory
 
-ESP4GW intends to develop DPMI-inspired memory services with managed backing storage and swap. This remains planned work. Larger PSRAM lets the initial implementation provide stable resident allocations while establishing ownership and access contracts for future eviction.
+ESP4GW intends to develop DPMI-inspired memory services with managed backing storage and swap. A raw file-backed page store now exists and passes isolated host tests, but the mapper has no paged-region kind, resident cache, eviction policy or implemented page-in path. Working paging remains planned. Larger PSRAM lets the initial implementation provide stable resident allocations while establishing ownership and access contracts for future eviction.
+
+The [pager header](include/esp4gw/pager.h) records the prospective API; the
+[file store](include/esp4gw/pager_file_store.h) supplies the lower-level storage
+primitive. Compiling that primitive does not make it active in applications.
+Its tests do not establish swap, arbitrary-capacity storage or power-loss
+durability.
 
 ESP32 systems can contain several distinct classes of storage and memory:
 
@@ -1043,6 +1092,24 @@ ESP4GW grew out of work porting the original **Descent** source to the ESP32-S3.
 That project exposed a recurring pattern: much of the engine could be compiled and adapted normally, while relatively small pieces of DOS-facing infrastructure repeatedly required replacement or compatibility shims.
 
 Rather than solving those problems only for one game, ESP4GW aims to turn them into reusable infrastructure for future ports.
+
+The current local dESPcent build imports shared ESP4GW in keyboard-only mode,
+with an engine-facing event sink and BLE/onscreen input routed through the
+shared service. Its DOS, display, audio and memory backends still contain local
+implementation. The existing hardware observations and fresh keyboard
+integration tests establish that narrower boundary, not adoption of every
+service in this repository.
+
+ROTT is the next application proving ground. Its current local build uses an
+in-tree ESP4GW compatibility snapshot rather than importing the entire root
+component. Engine integration is ongoing; this audit makes no completed-gameplay
+claim. Its role is to expose additional reusable contracts and require fewer
+application-specific adaptations as those contracts become available.
+
+The backport loop is about restoring original code, not merely sharing more
+utilities. Track which workarounds can be removed and which original engine
+paths return. Without source history, this audit does not claim a measured
+number of restored lines or completed resolution/double-buffer backports.
 
 Descent is therefore an important test case.
 
@@ -1121,10 +1188,15 @@ The following native services are available through menuconfig:
 
 `ESP4GW_KEYBOARD_ONLY=ON` is intended for applications already providing their own DOS interfaces. It exports the native keyboard layer without duplicate Watcom/DOS symbols. dESPcent uses this mode and subscribes to normalized events.
 
-`ESP4GW_MEMORY_ONLY=ON` builds only the native memory and E820 units and exports
+Despite its name, keyboard-only mode does not suppress separately enabled
+memory/speaker options. It forces the native keyboard, BLE-report and onscreen
+adapters and omits Watcom sources/include shadowing. Keyboard and its two
+adapter Kconfig options default on; memory and speaker default off.
+
+`ESP4GW_MEMORY_ONLY=ON` builds only the native memory, E820 and raw page-store units and exports
 `include`, without the Watcom personality or keyboard sources.
 `ESP4GW_NATIVE_ONLY=ON` omits the Watcom personality while honoring the native
-memory, keyboard, and speaker Kconfig switches; memapper uses this mode to combine
+memory, keyboard, and speaker Kconfig switches; memmapper uses this mode to combine
 memory services with optional input and sound. These are CMake integration modes;
 none enables the rest of the BIOS tree. There is currently no root Kconfig option for
 PIT/RTC chip selection or the new ISO, romfile, and timer-adapter units.
@@ -1133,7 +1205,7 @@ The [standalone receiver](examples/keyboard/README.md) demonstrates an ESP32-S3 
 
 ### Filesystems and paths
 
-The application supplies the mounted filesystem and path context. Native VFS paths do not automatically become DOS drive letters. Current default-directory handling applies to bare search patterns; complete drive mapping and historical pathname behavior remain separate work. Free-space queries also retain their documented mount-selection limitations.
+The application supplies the mounted filesystem and path context. Native VFS paths do not automatically become DOS drive letters. Current default-directory handling applies to bare search patterns; complete drive mapping and historical pathname behavior remain separate work. Free-space reporting currently queries `/`, not the selected SD/default-directory mount. Text and binary handle modes are equivalent, DOS share-denial modes are not enforced, and record locking is unsupported. Attribute changes are limited to the read-only bit; timestamp/date/time setters remain unsupported.
 
 ### Evidence and acceptance
 
@@ -1143,17 +1215,68 @@ The [keyboard tests](tests/keyboard/CMakeLists.txt) cover core behavior, runtime
 
 The [validation record](doc/keyboard-validation.md) reports prior results and resource measurements. Its keyboard storage figures exclude Bluetooth host allocations, framebuffers, and other application resources where stated; they are not the memory cost of the whole application.
 
-The [memory test project](tests/memory/CMakeLists.txt), run by
-`tools/test-memory.cmd`, covers the mapper, E820 records, paragraph allocator,
-baseline fixture, and MANIFEST renderer. `tools/build-memapper-host.cmd` builds
-and runs the host fixture. These checks establish the current memory subset;
-they do not validate the unintegrated ISO/resource/timer units or qualify an
-optimized memory layout. Firmware evidence and remaining hardware limitations
-are recorded in the [memapper README](examples/memmapper/README.md).
+The [memory test project](tests/memory/CMakeLists.txt) contains cases for the
+mapper, E820 records, paragraphs, baseline, journal, profiles and MANIFEST UI,
+plus raw page-store and telemetry helper tests. Its full build currently fails:
+several tests retain `examples/memapper` paths and old interfaces. Five buildable
+cases pass in a fresh Debug build; that is not an all-suite pass.
+
+Fresh verification on 2026-10-12 passed six keyboard cases (including two local
+dESPcent integrations), one speaker contract case, five memory/telemetry cases,
+and the host memmapper baseline. The host emitted a matching start/result ID
+and 2,949,120 checked bytes; zero timing fields reflect missing hardware clock
+hooks, not ESP32 performance. Telemetry helper tests do not prove that every
+firmware reporting path uses that helper.
+
+No new firmware flash, physical hardware qualification, Delphi test execution
+or release-package acceptance was performed in this documentation audit. The
+[evidence record](doc/readme-evidence-2026-10-12.md) distinguishes these fresh
+checks from historical builds and owner-observed device/viewer behavior.
+Firmware evidence and board details remain in the
+[memmapper README](examples/memmapper/README.md), whose older implementation
+notes must be read alongside the current source and the discrepancies above.
 
 New services should demonstrate observable contracts: register fields and flags, shared-state consistency, bounds, readiness, timeout/error behavior, ownership, and safe removal of callbacks. Device acceptance should include reconnect and simultaneous input sources where relevant.
 
 Future memory acceptance must include exhaustion, pinning, stale handles, in-flight access, and backing-store failure before swap support is claimed. Future vBIOS/DPMI acceptance consists of supported native application operations and callback round trips. There is no DOS boot milestone.
+
+### Current host build commands
+
+From a configured CMake/C++17 environment, the host checks can be built independently of ESP-IDF. Use Debug so assertion-based tests remain active; a multi-configuration generator also needs the `--config`/`-C` arguments shown here.
+
+```sh
+cmake -S tests/keyboard -B build/keyboard-tests -DCMAKE_BUILD_TYPE=Debug
+cmake --build build/keyboard-tests --config Debug
+ctest --test-dir build/keyboard-tests -C Debug --output-on-failure
+
+cmake -S tests/speaker -B build/speaker-tests -DCMAKE_BUILD_TYPE=Debug
+cmake --build build/speaker-tests --config Debug
+ctest --test-dir build/speaker-tests -C Debug --output-on-failure
+
+cmake -S examples/memmapper -B build/memmapper-host -Dmemmapper_HOST=ON -DCMAKE_BUILD_TYPE=Debug
+cmake --build build/memmapper-host --config Debug
+ctest --test-dir build/memmapper-host -C Debug --output-on-failure
+```
+
+The keyboard suite has four standalone cases and two optional dESPcent integration cases. Set `-DDESPCENT_SOURCE_DIR=/path/to/dESPcent` when configuring to select the application checkout; its existing default is the developer's Windows path. The optional numeric-menu case also requires Python 3.
+
+The full [memory test project](tests/memory/CMakeLists.txt) currently fails to build because several tests still use the former `examples/memapper` paths and associated old interfaces. Until reconciled, its buildable subset can be run explicitly:
+
+```sh
+cmake -S tests/memory -B build/memory-tests -DCMAKE_BUILD_TYPE=Debug
+cmake --build build/memory-tests --config Debug --target telemetry_test memory_test memmap_test paragraph_test pager_store_test
+ctest --test-dir build/memory-tests -C Debug --output-on-failure -R "^(memmapper_telemetry|memory_mapper|bios_memmap|memory_paragraphs|pager_file_store)$"
+```
+
+The workstation scripts in `tools` hardcode Visual Studio/Espressif paths.
+`tools/build-memapper-host.cmd` still uses the retired directory and wrong
+host-option spelling; use the CMake commands above. These scripts are not
+portable toolchain installers.
+
+For firmware, build the selected example in a configured ESP-IDF environment
+with `idf.py build`, after checking its board/configuration requirements. MMV
+has separate [IDE build instructions](examples/memmapper/tools/mmv/README.md)
+and a [validation checklist](examples/memmapper/tools/mmv/VALIDATION.md).
 
 ### Porting workflow
 
@@ -1163,6 +1286,8 @@ Future memory acceptance must include exhaustion, pinning, stale handles, in-fli
 4. Isolate unsupported hardware and architecture dependencies behind small adaptations.
 5. Add reusable behavior to ESP4GW when it benefits multiple consumers.
 6. Validate success, failure, lifecycle, and device interaction on the target.
+7. Backport proven shared services to earlier ports, remove superseded workarounds,
+   and restore original code where its contract is now satisfied.
 
 Diagnostics should identify unsupported requests accurately. Error translation belongs to each interface: carry/AX, zero flag, return codes, and `errno` are not equivalent. Unsupported capability probes can be normal application behavior and should return correct absence results. Tracing should be configurable so it does not distort performance measurements.
 
@@ -1186,16 +1311,19 @@ That sequence is a direction rather than a fixed schedule. Real source ports sho
 | [src/personalities/watcom](src/personalities/watcom) | Compiler-personality implementations and adapters. |
 | [src/keyboard](src/keyboard) | Shared keyboard core, runtime, mapping, and adapters. |
 | [src/core/bios](src/core/bios) | SeaBIOS foundation being adapted; `memmap.cpp` is included by the optional native memory component, other BIOS sources remain outside it. |
-| [src/memory](src/memory) | Opt-in profile-backed address mapping and native paragraph allocation; Watcom memory/DPMI adapters remain pending. |
+| [src/memory](src/memory) | Opt-in resident mapping, native paragraphs and isolated file page storage; Watcom memory/DPMI and paging integration remain pending. |
 | [src/speaker](src/speaker) | Optional monophonic tone state and PCM generation, shared by Watcom calls and native applications. |
 | [src/core/rtc](src/core/rtc) | Initial ESP-IDF deadline/callback adapter; native clock provider and build integration pending. |
-| [examples/memmapper](examples/memmapper) | Host/S3 memory correctness fixture and T-Embed MANIFEST UI for the planned profile optimizer. |
-| [tests/memory](tests/memory) | Host regression coverage for mapping, E820, paragraphs, the fixture, and UI rendering. |
+| [examples/memmapper](examples/memmapper) | Host/S3 memory experiment, T-Embed MANIFEST UI and experimental in-boot sweeps. |
+| [examples/memmapper/tools/mmv](examples/memmapper/tools/mmv) | Delphi FMX receive-only Windows serial/capture viewer. |
+| [tests/memory](tests/memory) | Host regression sources for memory, telemetry, page storage and the experiment/UI; full-suite build currently blocked by stale references. |
 | [Timer and DOS PIT reference](doc/ESP32-S3_Timer_and_DOS_PIT.docx) | S3 SYSTIMER hardware reference and the distinction between PIT system timing and RTC calendar services. |
 | [examples/keyboard](examples/keyboard) | Standalone receiver and integration example. |
 | [examples/smoke_test](examples/smoke_test) | ESP-IDF smoke application. |
 | [tests/keyboard](tests/keyboard) | Native regression and integration tests. |
 | [doc](doc) | Service contracts, validation, and historical analysis. |
+| [tests/speaker](tests/speaker) | Native tone/PCM contract test. |
+| [include/borland](include/borland), [doc/watcom-profile-drafts](doc/watcom-profile-drafts) | Historical headers and draft interfaces, not additional integrated runtime personalities. |
 | [Originals](Originals) | Historical reference material, not the native runtime. |
 
 The [Watcom reconciliation record](doc/reconciliation-2026-10-06.md) provides earlier context; its keyboard limitations are superseded by the newer keyboard service and validation documents. The [root CMake file](CMakeLists.txt) and [Kconfig](Kconfig) describe the current component build.
